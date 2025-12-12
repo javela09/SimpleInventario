@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Lector de Códigos</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-box">
+            <h1>📦 Lector de Códigos</h1>
+            <p class="subtitle">Inicia sesión para comenzar</p>
+            
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="usuario">Usuario</label>
+                    <input type="text" id="usuario" name="usuario" 
+                           placeholder="Introduce tu nombre de usuario" 
+                           required autocomplete="username" autofocus>
+                </div>
+                
+                <button type="submit" class="btn btn-primary" style="width: 100%;">Iniciar Sesión</button>
+                
+                <div id="errorMessage" class="error-message" style="display: none;"></div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const usuario = document.getElementById('usuario').value.trim();
+            
+            if (!usuario) {
+                mostrarError('Introduce tu nombre de usuario');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ usuario })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    window.location.href = '/lecturas';
+                } else {
+                    mostrarError(data.message || 'Error al iniciar sesión');
+                }
+            } catch (error) {
+                mostrarError('Error de conexión');
+            }
+        });
+        
+        function mostrarError(mensaje) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = mensaje;
+            errorDiv.style.display = 'block';
+            setTimeout(() => errorDiv.style.display = 'none', 5000);
+        }
+    </script>
+</body>
+</html>
