@@ -7,43 +7,22 @@ from psycopg_pool import ConnectionPool
 
 
 app = Flask(__name__)
-
-# En producción, mejor exigir SECRET_KEY (sin fallback inseguro)
-# En local puedes exportarla o ponerla en tu entorno.
 app.secret_key = os.environ["SECRET_KEY"]
 
-
-# --- Pool LAZY (serverless-friendly) ---
-_pool = None
-
-
-def get_pool() -> ConnectionPool:
-    """Crea (una sola vez por instancia) y devuelve el pool."""
-    global _pool
-    if _pool is None:
-        database_url = os.environ.get("DATABASE_URL")
-        if not database_url:
-            raise RuntimeError(
-                "DATABASE_URL no configurada. Proporciona la URL de Neon/Postgres."
-            )
-
-        _pool = ConnectionPool(
-            conninfo=database_url,
-            min_size=int(os.environ.get("PGPOOL_MIN_SIZE", 1)),
-            max_size=int(os.environ.get("PGPOOL_MAX_SIZE", 3)),
-            kwargs={"row_factory": dict_row},
-        )
-    return _pool
+_pool: ConnectionPool | None = None
+_schema_ready = False
 
 
-def get_db():
-    """Obtiene conexión a la base de datos (context manager)."""
-    return get_pool().connection()
+def _ensure_schema(pool: ConnectionPool) -> None:
+    """
+    Crea tablas/índices necesarios.
+    Importante: usa pool.connection() directo para NO llamar get_db()/get_pool() y evitar recursión.
+    """
+    global _schema_ready
+    if _schema_ready:
+        return
 
-
-def init_db():
-    """Inicializa la base de datos con las tablas necesarias (ejecutar MANUALMENTE)."""
-    with get_db() as conn:
+    with pool.connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
@@ -62,10 +41,15 @@ def init_db():
                     id SERIAL PRIMARY KEY,
                     codigo_articulo VARCHAR(255) NOT NULL,
                     descripcion TEXT,
-                    ean VARCHAR(255) UNIQUE,
+                    ean VARCHAR(255),
                     fecha_creacion TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                 )
                 """
+            )
+
+            # ✅ ON CONFLICT (ean) necesita un UNIQUE index/constraint
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS articulos_ean_unique_idx ON articulos (ean)"
             )
 
             cursor.execute(
@@ -81,38 +65,51 @@ def init_db():
                 """
             )
 
+            # Usuarios admin por defecto (idempotente)
             cursor.execute(
-                "SELECT COUNT(*) AS total FROM usuarios WHERE nombre_usuario = %s",
-                ("admin",),
+                "INSERT INTO usuarios (nombre_usuario, es_admin) VALUES (%s, %s) ON CONFLICT (nombre_usuario) DO NOTHING",
+                ("admin", True),
             )
-            if cursor.fetchone()["total"] == 0:
-                cursor.execute(
-                    "INSERT INTO usuarios (nombre_usuario, es_admin) VALUES (%s, %s)",
-                    ("admin", True),
-                )
-
             cursor.execute(
-                "SELECT COUNT(*) AS total FROM usuarios WHERE nombre_usuario = %s",
-                ("henkobit",),
+                "INSERT INTO usuarios (nombre_usuario, es_admin) VALUES (%s, %s) ON CONFLICT (nombre_usuario) DO NOTHING",
+                ("henkobit", True),
             )
-            if cursor.fetchone()["total"] == 0:
-                cursor.execute(
-                    "INSERT INTO usuarios (nombre_usuario, es_admin) VALUES (%s, %s)",
-                    ("henkobit", True),
-                )
 
-            conn.commit()
+        conn.commit()
+
+    _schema_ready = True
+
+
+def get_pool() -> ConnectionPool:
+    global _pool
+    if _pool is None:
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL no configurada")
+
+        _pool = ConnectionPool(
+            conninfo=database_url,
+            min_size=int(os.environ.get("PGPOOL_MIN_SIZE", 1)),
+            max_size=int(os.environ.get("PGPOOL_MAX_SIZE", 3)),
+            kwargs={"row_factory": dict_row},
+        )
+
+    # ✅ Garantiza esquema (una vez por instancia)
+    _ensure_schema(_pool)
+    return _pool
+
+
+def get_db():
+    return get_pool().connection()
 
 
 @app.route("/")
 def index():
-    """Página de login"""
     return render_template("login.html")
 
 
 @app.route("/api/login", methods=["POST"])
 def login():
-    """Procesa el login del usuario"""
     data = request.json or {}
     usuario = (data.get("usuario") or "").strip()
 
@@ -132,26 +129,17 @@ def login():
 
     session["usuario"] = usuario
     session["es_admin"] = bool(user["es_admin"])
-
-    return jsonify(
-        {
-            "success": True,
-            "message": "Login exitoso",
-            "es_admin": bool(user["es_admin"]),
-        }
-    )
+    return jsonify({"success": True, "es_admin": bool(user["es_admin"])})
 
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
-    """Cierra sesión"""
     session.clear()
     return jsonify({"success": True})
 
 
 @app.route("/lecturas")
 def lecturas():
-    """Página de lecturas para usuarios"""
     if "usuario" not in session:
         return render_template("login.html")
 
@@ -163,7 +151,6 @@ def lecturas():
 
 @app.route("/api/escanear", methods=["POST"])
 def escanear():
-    """Procesa un código de barras escaneado"""
     data = request.json or {}
     ean = (data.get("ean") or "").strip()
 
@@ -179,15 +166,7 @@ def escanear():
             articulo = cursor.fetchone()
 
             if not articulo:
-                return (
-                    jsonify(
-                        {
-                            "success": False,
-                            "message": f"No. Código {ean} NO encontrado en el maestro",
-                        }
-                    ),
-                    404,
-                )
+                return jsonify({"success": False, "message": f"No. Código {ean} NO encontrado en el maestro"}), 404
 
             cursor.execute(
                 """
@@ -202,9 +181,8 @@ def escanear():
                     articulo["descripcion"],
                 ),
             )
-
             lectura_id = cursor.fetchone()["id"]
-            conn.commit()
+        conn.commit()
 
     return jsonify(
         {
@@ -222,7 +200,6 @@ def escanear():
 
 @app.route("/api/lecturas", methods=["GET"])
 def obtener_lecturas():
-    """Obtiene todas las lecturas realizadas"""
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -234,24 +211,20 @@ def obtener_lecturas():
                 """
             )
             lecturas = cursor.fetchall()
-
     return jsonify(lecturas)
 
 
 @app.route("/api/lecturas/limpiar", methods=["DELETE"])
 def limpiar_lecturas():
-    """Elimina todas las lecturas"""
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("DELETE FROM lecturas")
-            conn.commit()
-
+        conn.commit()
     return jsonify({"success": True, "message": "Lecturas eliminadas"})
 
 
 @app.route("/api/exportar", methods=["GET"])
 def exportar_excel():
-    """Exporta las lecturas a Excel"""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
     from io import BytesIO
@@ -270,37 +243,21 @@ def exportar_excel():
     wb = Workbook()
     ws = wb.active
     ws.title = "Lecturas"
-
     headers = ["EAN", "Codigo Articulo", "Descripcion", "Fecha"]
     ws.append(headers)
 
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill(
-            start_color="121212", end_color="121212", fill_type="solid"
-        )
+        cell.fill = PatternFill(start_color="121212", end_color="121212", fill_type="solid")
 
     for row in lecturas:
         fecha_valor = row["fecha_lectura"]
         if isinstance(fecha_valor, datetime):
             fecha_formateada = fecha_valor.strftime("%d/%m/%Y %H:%M")
-        elif fecha_valor:
-            try:
-                fecha_dt = datetime.strptime(str(fecha_valor), "%Y-%m-%d %H:%M:%S")
-                fecha_formateada = fecha_dt.strftime("%d/%m/%Y %H:%M")
-            except Exception:
-                fecha_formateada = str(fecha_valor)
         else:
-            fecha_formateada = ""
+            fecha_formateada = str(fecha_valor) if fecha_valor else ""
 
-        ws.append(
-            [
-                row["ean"],
-                row["codigo_articulo"],
-                row["descripcion"] or "",
-                fecha_formateada,
-            ]
-        )
+        ws.append([row["ean"], row["codigo_articulo"], row["descripcion"] or "", fecha_formateada])
 
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 18
@@ -311,8 +268,7 @@ def exportar_excel():
     wb.save(output)
     output.seek(0)
 
-    fecha_actual = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"lecturas_{fecha_actual}.xlsx"
+    filename = f"lecturas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     return send_file(
         output,
@@ -322,23 +278,22 @@ def exportar_excel():
     )
 
 
-# === GESTIÓN DE ARTÍCULOS MAESTROS ===
+# === ARTÍCULOS ===
 
 @app.route("/api/articulos/importar", methods=["POST"])
 def importar_articulos():
-    """Importa artículos desde un archivo Excel"""
+    if not session.get("es_admin"):
+        return jsonify({"success": False, "message": "No autorizado"}), 403
+
     if "archivo" not in request.files:
         return jsonify({"success": False, "message": "No se recibió ningún archivo"}), 400
 
     archivo = request.files["archivo"]
-
     if archivo.filename == "":
         return jsonify({"success": False, "message": "Nombre de archivo vacío"}), 400
 
     if not archivo.filename.endswith((".xlsx", ".xls")):
-        return jsonify(
-            {"success": False, "message": "El archivo debe ser Excel (.xlsx o .xls)"}
-        ), 400
+        return jsonify({"success": False, "message": "El archivo debe ser Excel (.xlsx o .xls)"}), 400
 
     try:
         from openpyxl import load_workbook
@@ -367,20 +322,14 @@ def importar_articulos():
                             """,
                             (codigo_articulo, descripcion, ean),
                         )
-
                         if cursor.rowcount:
                             importados += 1
                         else:
                             errores += 1
 
-                conn.commit()
+            conn.commit()
 
-        return jsonify(
-            {
-                "success": True,
-                "message": f"Importados: {importados} artículos. Errores: {errores}",
-            }
-        )
+        return jsonify({"success": True, "message": f"Importados: {importados} artículos. Errores: {errores}"})
 
     except Exception as e:
         return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
@@ -388,34 +337,30 @@ def importar_articulos():
 
 @app.route("/api/articulos/count", methods=["GET"])
 def contar_articulos():
-    """Cuenta los artículos en el maestro"""
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("SELECT COUNT(*) AS total FROM articulos")
             count = cursor.fetchone()["total"]
-
     return jsonify({"count": count})
 
 
 @app.route("/api/articulos/limpiar", methods=["DELETE"])
 def limpiar_articulos():
-    """Elimina todos los artículos del maestro"""
     if not session.get("es_admin"):
         return jsonify({"success": False, "message": "No autorizado"}), 403
 
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("DELETE FROM articulos")
-            conn.commit()
+        conn.commit()
 
     return jsonify({"success": True, "message": "Tabla maestra limpiada"})
 
 
-# === GESTIÓN DE USUARIOS (SOLO ADMIN) ===
+# === USUARIOS (ADMIN) ===
 
 @app.route("/api/admin/usuarios", methods=["GET"])
 def obtener_usuarios():
-    """Obtiene todos los usuarios"""
     if not session.get("es_admin"):
         return jsonify({"success": False, "message": "No autorizado"}), 403
 
@@ -431,13 +376,11 @@ def obtener_usuarios():
 
 @app.route("/api/admin/usuarios", methods=["POST"])
 def crear_usuario():
-    """Crea un nuevo usuario"""
     if not session.get("es_admin"):
         return jsonify({"success": False, "message": "No autorizado"}), 403
 
     data = request.json or {}
     nombre = (data.get("nombre_usuario") or "").strip()
-
     if not nombre:
         return jsonify({"success": False, "message": "Nombre de usuario requerido"}), 400
 
@@ -452,9 +395,8 @@ def crear_usuario():
                 """,
                 (nombre, False),
             )
-
             nuevo = cursor.fetchone()
-            conn.commit()
+        conn.commit()
 
     if nuevo:
         return jsonify({"success": True, "message": "Usuario creado", "id": nuevo["id"]})
@@ -464,7 +406,6 @@ def crear_usuario():
 
 @app.route("/api/admin/usuarios/<int:usuario_id>", methods=["DELETE"])
 def eliminar_usuario(usuario_id):
-    """Elimina un usuario"""
     if not session.get("es_admin"):
         return jsonify({"success": False, "message": "No autorizado"}), 403
 
@@ -477,21 +418,14 @@ def eliminar_usuario(usuario_id):
                 return jsonify({"success": False, "message": "Usuario no encontrado"}), 404
 
             if user["nombre_usuario"] in ["admin", "henkobit"]:
-                return (
-                    jsonify(
-                        {"success": False, "message": "No se puede eliminar este administrador"}
-                    ),
-                    400,
-                )
+                return jsonify({"success": False, "message": "No se puede eliminar este administrador"}), 400
 
             cursor.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
-            conn.commit()
+        conn.commit()
 
     return jsonify({"success": True, "message": "Usuario eliminado"})
 
 
 if __name__ == "__main__":
-    # En local, si quieres inicializar la BD, ejecuta manualmente:
-    # init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(debug=True, host="0.0.0.0", port=port)
