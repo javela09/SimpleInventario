@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lector de Codigos de Barras</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>Lector de Codigos de Barras</h1>
+            <div class="user-info">
+                <span><strong>Usuario:</strong> {{ usuario }}</span>
+                <button id="btnExportar" class="btn btn-success">Exportar Excel</button>
+                <button id="logoutBtn" class="btn btn-secondary">Cerrar sesion</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <!-- Area de escaneo -->
+        <div class="content-area">
+            <div class="scan-section">
+                <h2>Escanear codigo de barras</h2>
+                <div class="scan-input-container">
+                    <input type="text"
+                           id="inputEan"
+                           placeholder="Escanea o introduce el codigo de barras..."
+                           autofocus
+                           autocomplete="off">
+                    <button id="btnEscanear" class="btn btn-primary btn-large">Buscar</button>
+                </div>
+
+                <!-- Resultado -->
+                <div id="resultado" class="resultado" style="display: none;">
+                    <div class="resultado-content">
+                        <span class="resultado-icon"></span>
+                        <div class="resultado-text">
+                            <p class="resultado-mensaje"></p>
+                            <div class="resultado-detalle"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar lecturas -->
+        <div class="sidebar-lecturas">
+            <h2>Lecturas realizadas</h2>
+            <div id="listaLecturas" class="lecturas-lista">
+                <p class="empty-message">No hay lecturas todavia</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const inputEan = document.getElementById('inputEan');
+
+        // Cargar al iniciar
+        document.addEventListener('DOMContentLoaded', () => {
+            cargarLecturas();
+            inputEan.focus();
+        });
+
+        // Escanear con Enter
+        inputEan.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                escanear();
+            }
+        });
+
+        // Boton escanear
+        document.getElementById('btnEscanear').addEventListener('click', escanear);
+
+        // Funcion de escaneo
+        async function escanear() {
+            const ean = inputEan.value.trim();
+            if (!ean) return;
+
+            try {
+                const response = await fetch('/api/escanear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ean })
+                });
+
+                const data = await response.json();
+                mostrarResultado(data, response.ok);
+
+                if (response.ok) {
+                    cargarLecturas();
+                }
+            } catch (error) {
+                mostrarResultado({ success: false, message: 'Error de conexion' }, false);
+            }
+
+            inputEan.value = '';
+            inputEan.focus();
+        }
+
+        // Mostrar resultado
+        function mostrarResultado(data, success) {
+            const resultado = document.getElementById('resultado');
+            const icon = resultado.querySelector('.resultado-icon');
+            const mensaje = resultado.querySelector('.resultado-mensaje');
+            const detalle = resultado.querySelector('.resultado-detalle');
+
+            resultado.style.display = 'block';
+            resultado.className = 'resultado ' + (success ? 'success' : 'error');
+
+            if (success) {
+                icon.textContent = 'OK';
+                mensaje.textContent = data.message;
+                detalle.innerHTML = `
+                    <div class="detalle-item"><strong>EAN:</strong> ${data.lectura.ean}</div>
+                    <div class="detalle-item"><strong>Codigo:</strong> ${data.lectura.codigo_articulo}</div>
+                    <div class="detalle-item"><strong>Descripcion:</strong> ${data.lectura.descripcion || '-'}</div>
+                `;
+            } else {
+                icon.textContent = ':(';
+                mensaje.textContent = data.message;
+                detalle.innerHTML = '';
+            }
+
+            setTimeout(() => resultado.style.display = 'none', 5000);
+        }
+
+        // Cargar lecturas
+        async function cargarLecturas() {
+            try {
+                const response = await fetch('/api/lecturas');
+                const lecturas = await response.json();
+
+                const lista = document.getElementById('listaLecturas');
+
+                if (lecturas.length === 0) {
+                    lista.innerHTML = '<p class="empty-message">No hay lecturas todavia</p>';
+                    return;
+                }
+
+                lista.innerHTML = lecturas.map(l => `
+                    <div class="lectura-item">
+                        <div class="lectura-ean">${l.ean}</div>
+                        <div class="lectura-codigo">${l.codigo_articulo}</div>
+                        <div class="lectura-descripcion">${l.descripcion || '-'}</div>
+                        <div class="lectura-fecha">${formatearFecha(l.fecha_lectura)}</div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        }
+
+        function formatearFecha(fecha) {
+            if (!fecha) return '';
+            const d = new Date(fecha);
+            return d.toLocaleString('es-ES', {
+                day: '2-digit', month: '2-digit', year: 'numeric',
+                hour: '2-digit', minute: '2-digit'
+            });
+        }
+
+        // Exportar
+        document.getElementById('btnExportar').addEventListener('click', () => {
+            window.location.href = '/api/exportar';
+        });
+
+        // Logout
+        document.getElementById('logoutBtn').addEventListener('click', async () => {
+            await fetch('/api/logout', { method: 'POST' });
+            window.location.href = '/';
+        });
+
+        // Mantener focus
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('button')) {
+                inputEan.focus();
+            }
+        });
+    </script>
+</body>
+</html>

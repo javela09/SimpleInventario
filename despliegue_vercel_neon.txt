@@ -1,0 +1,24 @@
+Pasos para desplegar en Vercel usando Neon (PostgreSQL serverless)
+
+1) Crear base de datos en Neon
+   - Entra a https://neon.tech, crea proyecto y base.
+   - Copia la cadena de conexión en formato URI (por ejemplo: postgresql://usuario:password@host/neondb).
+   - Si la URL no incluye sslmode, agrega ?sslmode=require al final.
+
+2) Configurar variables en Vercel
+   - DATABASE_URL: pega la URL completa de Neon (con sslmode=require).
+   - SECRET_KEY: clave aleatoria para sesiones.
+   - Opcionales: PGPOOL_MIN_SIZE, PGPOOL_MAX_SIZE para el pool (por defecto 1 y 3).
+
+3) Subir el código
+   - Conecta el repo a Vercel o usa la CLI:
+     vercel --prod
+   - El archivo vercel.json ya enruta todo a app.py con runtime Python 3.11 y sirve /static.
+
+4) Primer arranque
+   - La app crea las tablas y los usuarios admin y henkobit al primer request.
+   - Entra a la URL del deploy, inicia sesión como admin o henkobit y carga el maestro de artículos desde el panel.
+
+5) Verificaciones rápidas
+   - /api/health no existe; para probar, abre la página y haz login.
+   - Exportar Excel debe descargar lecturas; importar Excel debe poblar el maestro; panel de usuarios debe permitir crear/eliminar (menos los protegidos).
