@@ -79,207 +79,208 @@
     </div>
 
     <script>
-        async function apiFetch(url, options = {}) {
-            const res = await fetch(url, options);
-            const text = await res.text(); // puede ser JSON o HTML
-            let data = null;
-            try { data = JSON.parse(text); } catch (e) {}
+  async function apiFetch(url, options = {}) {
+    const res = await fetch(url, options);
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (_) {}
 
-            if (!res.ok) {
-                const msg = (data && data.message) ? data.message : `HTTP ${res.status}`;
-                throw new Error(msg);
-            }
-            return data ?? {};
-        }
+    if (!res.ok) {
+      const msg = data?.message || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return data ?? {};
+  }
 
-        document.addEventListener('DOMContentLoaded', () => {
-            cargarUsuarios();
-            cargarContadorArticulos();
-            cargarLecturas();
-        });
+  document.addEventListener('DOMContentLoaded', () => {
+    cargarUsuarios();
+    cargarContadorArticulos();
+    cargarLecturas();
+  });
 
-        // === USUARIOS ===
-        document.getElementById('btnNuevoUsuario').addEventListener('click', () => {
-            document.getElementById('formNuevoUsuario').style.display = 'block';
-            document.getElementById('nombreUsuario').focus();
-        });
+  // === USUARIOS ===
+  document.getElementById('btnNuevoUsuario').addEventListener('click', () => {
+    document.getElementById('formNuevoUsuario').style.display = 'block';
+    document.getElementById('nombreUsuario').focus();
+  });
 
-        function cancelarFormUsuario() {
-            document.getElementById('formNuevoUsuario').style.display = 'none';
-            document.getElementById('formUsuario').reset();
-        }
+  function cancelarFormUsuario() {
+    document.getElementById('formNuevoUsuario').style.display = 'none';
+    document.getElementById('formUsuario').reset();
+  }
 
-        document.getElementById('formUsuario').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const nombre_usuario = document.getElementById('nombreUsuario').value.trim();
+  document.getElementById('formUsuario').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const nombre_usuario = document.getElementById('nombreUsuario').value.trim();
 
-            try {
-                const data = await apiFetch('/api/admin/usuarios', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ nombre_usuario })
-                });
+    try {
+      await apiFetch('/api/admin/usuarios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nombre_usuario })
+      });
 
-                alert('Usuario creado');
-                cancelarFormUsuario();
-                cargarUsuarios();
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        });
+      alert('✓ Usuario creado');
+      cancelarFormUsuario();
+      cargarUsuarios();
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  });
 
-        async function cargarUsuarios() {
-            try {
-                const usuarios = await apiFetch('/api/admin/usuarios');
-                const lista = document.getElementById('listaUsuarios');
+  async function cargarUsuarios() {
+    try {
+      const usuarios = await apiFetch('/api/admin/usuarios');
+      const lista = document.getElementById('listaUsuarios');
 
-                if (!usuarios.length) {
-                    lista.innerHTML = '<p class="no-data">No hay usuarios</p>';
-                    return;
-                }
+      if (!usuarios.length) {
+        lista.innerHTML = '<p class="no-data">No hay usuarios</p>';
+        return;
+      }
 
-                let html = '<table><thead><tr><th>ID</th><th>Usuario</th><th>Tipo</th><th>Acciones</th></tr></thead><tbody>';
+      let html = '<table><thead><tr><th>ID</th><th>Usuario</th><th>Tipo</th><th>Acciones</th></tr></thead><tbody>';
 
-                usuarios.forEach(u => {
-                    const esProtegido = u.nombre_usuario === 'admin' || u.nombre_usuario === 'henkobit';
-                    html += `
-                    <tr>
-                        <td>${u.id}</td>
-                        <td>${u.nombre_usuario}</td>
-                        <td>${u.es_admin ? '<span class="badge-admin">Admin</span>' : '<span class="badge-user">Usuario</span>'}</td>
-                        <td>
-                        ${esProtegido
-                            ? '<span class="badge-protegido">Protegido</span>'
-                            : `<button class="btn-eliminar" onclick="eliminarUsuario(${u.id}, '${u.nombre_usuario}')">Eliminar</button>`
-                        }
-                        </td>
-                    </tr>
-                    `;
-                });
+      usuarios.forEach(u => {
+        const esProtegido = u.nombre_usuario === 'admin' || u.nombre_usuario === 'henkobit';
+        html += `
+          <tr>
+            <td>${u.id}</td>
+            <td>${u.nombre_usuario}</td>
+            <td>${u.es_admin ? '<span class="badge-admin">Admin</span>' : '<span class="badge-user">Usuario</span>'}</td>
+            <td>
+              ${esProtegido
+                ? '<span class="badge-protegido">Protegido</span>'
+                : `<button class="btn-eliminar" onclick="eliminarUsuario(${u.id}, '${u.nombre_usuario}')">🗑️ Eliminar</button>`
+              }
+            </td>
+          </tr>
+        `;
+      });
 
-                html += '</tbody></table>';
-                lista.innerHTML = html;
-            } catch (error) {
-                document.getElementById('listaUsuarios').innerHTML = `<p class="no-data">Error: ${error.message}</p>`;
-            }
-        }
+      html += '</tbody></table>';
+      lista.innerHTML = html;
+    } catch (error) {
+      document.getElementById('listaUsuarios').innerHTML = `<p class="no-data">Error: ${error.message}</p>`;
+    }
+  }
 
-        async function eliminarUsuario(id, nombre) {
-            if (!confirm(`Eliminar usuario "${nombre}"?`)) return;
+  async function eliminarUsuario(id, nombre) {
+    if (!confirm(`¿Eliminar usuario "${nombre}"?`)) return;
 
-            try {
-                await apiFetch(`/api/admin/usuarios/${id}`, { method: 'DELETE' });
-                alert('Usuario eliminado');
-                cargarUsuarios();
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
+    try {
+      await apiFetch(`/api/admin/usuarios/${id}`, { method: 'DELETE' });
+      alert('✓ Usuario eliminado');
+      cargarUsuarios();
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  }
 
-        // === ARTICULOS ===
-        async function cargarContadorArticulos() {
-            try {
-                const data = await apiFetch('/api/articulos/count');
-                document.getElementById('contadorArticulos').textContent = `${data.count} articulos`;
-            } catch (error) {
-                console.error('Error:', error.message);
-            }
-        }
+  // === ARTÍCULOS ===
+  async function cargarContadorArticulos() {
+    try {
+      const data = await apiFetch('/api/articulos/count');
+      document.getElementById('contadorArticulos').textContent = `${data.count} artículos`;
+    } catch (error) {
+      console.error('Error:', error.message);
+    }
+  }
 
-        document.getElementById('archivoExcel').addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
+  document.getElementById('archivoExcel').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
 
-            const formData = new FormData();
-            formData.append('archivo', file);
+    const formData = new FormData();
+    formData.append('archivo', file);
 
-            try {
-                const data = await apiFetch('/api/articulos/importar', {
-                    method: 'POST',
-                    body: formData
-                });
-                alert(data.message);
-                cargarContadorArticulos();
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
+    try {
+      const data = await apiFetch('/api/articulos/importar', {
+        method: 'POST',
+        body: formData
+      });
 
-            e.target.value = '';
-        });
+      alert(data.message);
+      cargarContadorArticulos();
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
 
-        document.getElementById('btnLimpiarMaestro').addEventListener('click', async () => {
-            if (!confirm('Eliminar TODOS los articulos del maestro?')) return;
+    e.target.value = '';
+  });
 
-            try {
-                const data = await apiFetch('/api/articulos/limpiar', { method: 'DELETE' });
-                cargarContadorArticulos();
-                alert(data.message || 'Maestro limpiado');
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        });
+  document.getElementById('btnLimpiarMaestro').addEventListener('click', async () => {
+    if (!confirm('¿Eliminar TODOS los artículos del maestro?')) return;
 
-        // === LECTURAS ===
-        async function cargarLecturas() {
-            try {
-                const lecturas = await apiFetch('/api/lecturas');
-                const lista = document.getElementById('listaLecturas');
+    try {
+      const data = await apiFetch('/api/articulos/limpiar', { method: 'DELETE' });
+      cargarContadorArticulos();
+      alert(data.message || 'Maestro limpiado');
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  });
 
-                if (!lecturas.length) {
-                    lista.innerHTML = '<p class="no-data">No hay lecturas</p>';
-                    return;
-                }
+  // === LECTURAS ===
+  async function cargarLecturas() {
+    try {
+      const lecturas = await apiFetch('/api/lecturas');
+      const lista = document.getElementById('listaLecturas');
 
-                let html = '<table><thead><tr><th>EAN</th><th>Codigo</th><th>Descripcion</th><th>Fecha</th></tr></thead><tbody>';
+      if (!lecturas.length) {
+        lista.innerHTML = '<p class="no-data">No hay lecturas</p>';
+        return;
+      }
 
-                lecturas.slice(0, 50).forEach(l => {
-                    html += `
-                    <tr>
-                        <td style="font-family: monospace; font-weight: 600;">${l.ean}</td>
-                        <td>${l.codigo_articulo}</td>
-                        <td>${l.descripcion || '-'}</td>
-                        <td>${formatearFecha(l.fecha_lectura)}</td>
-                    </tr>
-                    `;
-                });
+      let html = '<table><thead><tr><th>EAN</th><th>Código</th><th>Descripción</th><th>Fecha</th></tr></thead><tbody>';
 
-                html += '</tbody></table>';
-                lista.innerHTML = html;
-            } catch (error) {
-                document.getElementById('listaLecturas').innerHTML = `<p class="no-data">Error: ${error.message}</p>`;
-            }
-        }
+      lecturas.slice(0, 50).forEach(l => {
+        html += `
+          <tr>
+            <td style="font-family: monospace; font-weight: 600;">${l.ean}</td>
+            <td>${l.codigo_articulo}</td>
+            <td>${l.descripcion || '-'}</td>
+            <td>${formatearFecha(l.fecha_lectura)}</td>
+          </tr>
+        `;
+      });
 
-        function formatearFecha(fecha) {
-            if (!fecha) return '';
-            const d = new Date(fecha);
-            return d.toLocaleString('es-ES', {
-                day: '2-digit', month: '2-digit', year: 'numeric',
-                hour: '2-digit', minute: '2-digit'
-            });
-        }
+      html += '</tbody></table>';
+      lista.innerHTML = html;
+    } catch (error) {
+      document.getElementById('listaLecturas').innerHTML = `<p class="no-data">Error: ${error.message}</p>`;
+    }
+  }
 
-        document.getElementById('btnLimpiarLecturas').addEventListener('click', async () => {
-            if (!confirm('Eliminar TODAS las lecturas?')) return;
+  function formatearFecha(fecha) {
+    if (!fecha) return '';
+    const d = new Date(fecha);
+    return d.toLocaleString('es-ES', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+  }
 
-            try {
-                const data = await apiFetch('/api/lecturas/limpiar', { method: 'DELETE' });
-                cargarLecturas();
-                alert(data.message || 'Lecturas eliminadas');
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        });
+  document.getElementById('btnLimpiarLecturas').addEventListener('click', async () => {
+    if (!confirm('¿Eliminar TODAS las lecturas?')) return;
 
-        // === EXPORTAR Y LOGOUT ===
-        document.getElementById('btnExportar').addEventListener('click', () => {
-            window.location.href = '/api/exportar';
-        });
+    try {
+      const data = await apiFetch('/api/lecturas/limpiar', { method: 'DELETE' });
+      cargarLecturas();
+      alert(data.message || 'Lecturas eliminadas');
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  });
 
-        document.getElementById('logoutBtn').addEventListener('click', async () => {
-            await fetch('/api/logout', { method: 'POST' });
-            window.location.href = '/';
-        });
-    </script>
+  // === EXPORTAR Y LOGOUT ===
+  document.getElementById('btnExportar').addEventListener('click', () => {
+    window.location.href = '/api/exportar';
+  });
+
+  document.getElementById('logoutBtn').addEventListener('click', async () => {
+    await fetch('/api/logout', { method: 'POST' });
+    window.location.href = '/';
+  });
+</script>
 </body>
 </html>
