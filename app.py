@@ -300,47 +300,105 @@ def importar_articulos():
         return jsonify({"success": False, "message": "No se recibio ningun archivo"}), 400
 
     archivo = request.files["archivo"]
-    if archivo.filename == "":
+    if not archivo or archivo.filename == "":
         return jsonify({"success": False, "message": "Nombre de archivo vacio"}), 400
 
-    if not archivo.filename.endswith((".xlsx", ".xls")):
+    if not archivo.filename.lower().endswith((".xlsx", ".xls")):
         return jsonify({"success": False, "message": "El archivo debe ser Excel (.xlsx o .xls)"}), 400
+
+    def norm_str(x):
+        return str(x).strip() if x is not None else ""
+
+    def norm_ean(x):
+        """
+        Convierte EAN desde:
+        - números (excel): 8.412345678901e12, 8412345678901.0, etc.
+        - strings con espacios
+        Devuelve string solo-dígitos o "" si no es válido.
+        """
+        if x is None:
+            return ""
+        # si es número, evita .0 y notación científica
+        if isinstance(x, (int,)):
+            s = str(x)
+        elif isinstance(x, float):
+            # 8412345678901.0 -> 8412345678901
+            if x.is_integer():
+                s = str(int(x))
+            else:
+                s = format(x, "f").rstrip("0").rstrip(".")
+        else:
+            s = str(x).strip()
+
+        # quita espacios y caracteres raros
+        s = s.replace(" ", "").replace("\t", "").replace("\n", "")
+
+        # algunos excels convierten a científico en texto: "8.4123E+12"
+        # intentamos parsear si contiene 'e'/'E'
+        if "e" in s.lower():
+            try:
+                s = str(int(float(s)))
+            except Exception:
+                pass
+
+        # deja solo dígitos
+        s_digits = "".join(ch for ch in s if ch.isdigit())
+        return s_digits
 
     try:
         from openpyxl import load_workbook
 
-        wb = load_workbook(archivo)
+        # data_only=True para que lea valores calculados si hay fórmulas
+        wb = load_workbook(archivo, data_only=True)
         ws = wb.active
+
+        total_filas = 0
+        filas_validas = 0
+        descartadas = 0
+        importados = 0
+        duplicados = 0
 
         with get_db() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("DELETE FROM articulos")
 
-                importados = 0
-                errores = 0
-
                 for row in ws.iter_rows(min_row=2, values_only=True):
-                    codigo_articulo = str(row[0]).strip() if row[0] else ""
-                    descripcion = str(row[1]).strip() if row[1] else ""
-                    ean = str(row[2]).strip() if row[2] else None
+                    total_filas += 1
 
-                    if codigo_articulo and ean:
-                        cursor.execute(
-                            """
-                            INSERT INTO articulos (codigo_articulo, descripcion, ean)
-                            VALUES (%s, %s, %s)
-                            ON CONFLICT (ean) DO NOTHING
-                            """,
-                            (codigo_articulo, descripcion, ean),
-                        )
-                        if cursor.rowcount:
-                            importados += 1
-                        else:
-                            errores += 1
+                    codigo_articulo = norm_str(row[0] if len(row) > 0 else None)
+                    descripcion = norm_str(row[1] if len(row) > 1 else None)
+                    ean = norm_ean(row[2] if len(row) > 2 else None)
+
+                    if not codigo_articulo or not ean:
+                        descartadas += 1
+                        continue
+
+                    filas_validas += 1
+
+                    cursor.execute(
+                        """
+                        INSERT INTO articulos (codigo_articulo, descripcion, ean)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (ean) DO NOTHING
+                        """,
+                        (codigo_articulo, descripcion, ean),
+                    )
+
+                    if cursor.rowcount:
+                        importados += 1
+                    else:
+                        duplicados += 1
 
             conn.commit()
 
-        return jsonify({"success": True, "message": f"Importados: {importados} articulos. Errores: {errores}"})
+        return jsonify({
+            "success": True,
+            "message": (
+                f"Importación OK. Total filas: {total_filas}. "
+                f"Válidas: {filas_validas}. Importadas: {importados}. "
+                f"Duplicadas: {duplicados}. Descartadas: {descartadas}."
+            )
+        })
 
     except Exception as e:
         return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
