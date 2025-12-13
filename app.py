@@ -297,62 +297,108 @@ def importar_articulos():
         return jsonify({"success": False, "message": "No autorizado"}), 403
 
     if "archivo" not in request.files:
-        return jsonify({"success": False, "message": "No se recibió archivo"}), 400
+        return jsonify({"success": False, "message": "No se recibio ningun archivo"}), 400
 
     archivo = request.files["archivo"]
-    if not archivo.filename.lower().endswith(".xlsx"):
-        return jsonify({"success": False, "message": "Debe ser un archivo .xlsx"}), 400
+    if not archivo or archivo.filename == "":
+        return jsonify({"success": False, "message": "Nombre de archivo vacio"}), 400
 
-    from openpyxl import load_workbook
-    from io import StringIO
+    if not archivo.filename.lower().endswith((".xlsx", ".xls")):
+        return jsonify({"success": False, "message": "El archivo debe ser Excel (.xlsx o .xls)"}), 400
 
-    def norm(x):
+    def norm_str(x):
+        return str(x).strip() if x is not None else ""
+
+    def norm_ean(x):
+        """
+        Convierte EAN desde:
+        - números (excel): 8.412345678901e12, 8412345678901.0, etc.
+        - strings con espacios
+        Devuelve string solo-dígitos o "" si no es válido.
+        """
         if x is None:
             return ""
-        if isinstance(x, float):
+        # si es número, evita .0 y notación científica
+        if isinstance(x, (int,)):
+            s = str(x)
+        elif isinstance(x, float):
+            # 8412345678901.0 -> 8412345678901
             if x.is_integer():
-                return str(int(x))
-            return format(x, "f").rstrip("0").rstrip(".")
-        return str(x).strip()
+                s = str(int(x))
+            else:
+                s = format(x, "f").rstrip("0").rstrip(".")
+        else:
+            s = str(x).strip()
 
-    wb = load_workbook(archivo, data_only=True, read_only=True)
-    ws = wb.active
+        # quita espacios y caracteres raros
+        s = s.replace(" ", "").replace("\t", "").replace("\n", "")
 
-    buffer = StringIO()
-    total = 0
+        # algunos excels convierten a científico en texto: "8.4123E+12"
+        # intentamos parsear si contiene 'e'/'E'
+        if "e" in s.lower():
+            try:
+                s = str(int(float(s)))
+            except Exception:
+                pass
 
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        codigo = norm(row[0])
-        descripcion = norm(row[1])
-        ean = norm(row[2])
+        # deja solo dígitos
+        s_digits = "".join(ch for ch in s if ch.isdigit())
+        return s_digits
 
-        if not codigo or not ean:
-            continue
+    try:
+        from openpyxl import load_workbook
 
-        buffer.write(f"{codigo}\t{descripcion}\t{ean}\n")
-        total += 1
+        # data_only=True para que lea valores calculados si hay fórmulas
+        wb = load_workbook(archivo, data_only=True)
+        ws = wb.active
 
-    buffer.seek(0)
+        total_filas = 0
+        filas_validas = 0
+        descartadas = 0
+        importados = 0
+        duplicados = 0
 
-    with get_db() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("TRUNCATE articulos")
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM articulos")
 
-            cursor.copy(
-                """
-                COPY articulos (codigo_articulo, descripcion, ean)
-                FROM STDIN
-                WITH (FORMAT text)
-                """,
-                buffer
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    total_filas += 1
+
+                    codigo_articulo = norm_str(row[0] if len(row) > 0 else None)
+                    descripcion = norm_str(row[1] if len(row) > 1 else None)
+                    ean = norm_ean(row[2] if len(row) > 2 else None)
+
+                    if not codigo_articulo or not ean:
+                        descartadas += 1
+                        continue
+
+                    filas_validas += 1
+
+                    cursor.execute(
+                        """
+                        INSERT INTO articulos (codigo_articulo, descripcion, ean)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (ean) DO NOTHING
+                        """,
+                        (codigo_articulo, descripcion, ean),
+                    )
+
+                    if cursor.rowcount:
+                        importados += 1
+                    else:
+                        duplicados += 1
+
+            conn.commit()
+
+        return jsonify({
+            "success": True,
+            "message": (
+                f"Importación OK. Total filas: {total_filas}. "
+                f"Válidas: {filas_validas}. Importadas: {importados}. "
+                f"Duplicadas: {duplicados}. Descartadas: {descartadas}."
             )
-
-        conn.commit()
-
-    return jsonify({
-        "success": True,
-        "message": f"Importación completada: {total} artículos cargados"
-    })
+        })
 
     except Exception as e:
         return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
