@@ -1,40 +1,21 @@
+from flask import Flask, render_template, request, jsonify, send_file, session
 import os
 from datetime import datetime
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from io import StringIO
 
-from flask import Flask, jsonify, render_template, request, send_file, session
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 
 app = Flask(__name__)
-_default_secret = "dev-secret-change-me"
-app.secret_key = os.environ.get("SECRET_KEY", _default_secret)
-if app.secret_key == _default_secret:
-    app.logger.warning("SECRET_KEY no configurada; usando valor inseguro solo para desarrollo")
+app.secret_key = os.environ["SECRET_KEY"]
 
 _pool: ConnectionPool | None = None
 _schema_ready = False
 
 
-def _normalize_database_url(raw_url: str) -> str:
-    parsed = urlparse(raw_url)
-    scheme = "postgresql" if parsed.scheme == "postgres" else parsed.scheme
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-
-    # Neon exige conexiones TLS; si no se especifica, forzamos sslmode=require
-    if "sslmode" not in query:
-        query["sslmode"] = "require"
-
-    normalized = parsed._replace(scheme=scheme, query=urlencode(query))
-    return urlunparse(normalized)
-
-
 def _ensure_schema(pool: ConnectionPool) -> None:
-    """
-    Crea tablas e indices necesarios de forma idempotente.
-    Importante: usa pool.connection() directo para no llamar get_db()/get_pool() y evitar recursion.
-    """
+    """Crea tablas/índices necesarios una vez por instancia."""
     global _schema_ready
     if _schema_ready:
         return
@@ -64,8 +45,10 @@ def _ensure_schema(pool: ConnectionPool) -> None:
                 """
             )
 
-            # ON CONFLICT (ean) necesita un indice/constraint UNIQUE
-            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS articulos_ean_unique_idx ON articulos (ean)")
+            # Para búsquedas rápidas y para futuros UPSERTs (si algún día lo necesitas)
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS articulos_ean_unique_idx ON articulos (ean)"
+            )
 
             cursor.execute(
                 """
@@ -80,13 +63,15 @@ def _ensure_schema(pool: ConnectionPool) -> None:
                 """
             )
 
-            # Usuarios admin por defecto (idempotente)
+            # Admins por defecto (idempotente)
             cursor.execute(
-                "INSERT INTO usuarios (nombre_usuario, es_admin) VALUES (%s, %s) ON CONFLICT (nombre_usuario) DO NOTHING",
+                "INSERT INTO usuarios (nombre_usuario, es_admin) VALUES (%s, %s) "
+                "ON CONFLICT (nombre_usuario) DO NOTHING",
                 ("admin", True),
             )
             cursor.execute(
-                "INSERT INTO usuarios (nombre_usuario, es_admin) VALUES (%s, %s) ON CONFLICT (nombre_usuario) DO NOTHING",
+                "INSERT INTO usuarios (nombre_usuario, es_admin) VALUES (%s, %s) "
+                "ON CONFLICT (nombre_usuario) DO NOTHING",
                 ("henkobit", True),
             )
 
@@ -102,15 +87,13 @@ def get_pool() -> ConnectionPool:
         if not database_url:
             raise RuntimeError("DATABASE_URL no configurada")
 
-        conninfo = _normalize_database_url(database_url)
         _pool = ConnectionPool(
-            conninfo=conninfo,
+            conninfo=database_url,
             min_size=int(os.environ.get("PGPOOL_MIN_SIZE", 1)),
             max_size=int(os.environ.get("PGPOOL_MAX_SIZE", 3)),
             kwargs={"row_factory": dict_row},
         )
 
-    # Garantiza esquema (una sola vez por instancia)
     _ensure_schema(_pool)
     return _pool
 
@@ -134,7 +117,10 @@ def login():
 
     with get_db() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT id, es_admin FROM usuarios WHERE nombre_usuario = %s", (usuario,))
+            cursor.execute(
+                "SELECT id, es_admin FROM usuarios WHERE nombre_usuario = %s",
+                (usuario,),
+            )
             user = cursor.fetchone()
 
     if not user:
@@ -168,15 +154,18 @@ def escanear():
     ean = (data.get("ean") or "").strip()
 
     if not ean:
-        return jsonify({"success": False, "message": "Codigo de barras vacio"}), 400
+        return jsonify({"success": False, "message": "Código de barras vacío"}), 400
 
     with get_db() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT codigo_articulo, descripcion FROM articulos WHERE ean = %s", (ean,))
+            cursor.execute(
+                "SELECT codigo_articulo, descripcion FROM articulos WHERE ean = %s",
+                (ean,),
+            )
             articulo = cursor.fetchone()
 
             if not articulo:
-                return jsonify({"success": False, "message": f"El codigo {ean} no esta en el maestro"}), 404
+                return jsonify({"success": False, "message": f"No. Código {ean} NO encontrado en el maestro"}), 404
 
             cursor.execute(
                 """
@@ -197,7 +186,7 @@ def escanear():
     return jsonify(
         {
             "success": True,
-            "message": "Articulo encontrado y registrado",
+            "message": "No. Artículo encontrado y registrado",
             "lectura": {
                 "id": lectura_id,
                 "ean": ean,
@@ -235,10 +224,9 @@ def limpiar_lecturas():
 
 @app.route("/api/exportar", methods=["GET"])
 def exportar_excel():
-    from io import BytesIO
-
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
+    from io import BytesIO
 
     with get_db() as conn:
         with conn.cursor() as cursor:
@@ -263,11 +251,7 @@ def exportar_excel():
 
     for row in lecturas:
         fecha_valor = row["fecha_lectura"]
-        if isinstance(fecha_valor, datetime):
-            fecha_formateada = fecha_valor.strftime("%d/%m/%Y %H:%M")
-        else:
-            fecha_formateada = str(fecha_valor) if fecha_valor else ""
-
+        fecha_formateada = fecha_valor.strftime("%d/%m/%Y %H:%M") if isinstance(fecha_valor, datetime) else (str(fecha_valor) if fecha_valor else "")
         ws.append([row["ean"], row["codigo_articulo"], row["descripcion"] or "", fecha_formateada])
 
     ws.column_dimensions["A"].width = 20
@@ -280,7 +264,6 @@ def exportar_excel():
     output.seek(0)
 
     filename = f"lecturas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-
     return send_file(
         output,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -289,115 +272,85 @@ def exportar_excel():
     )
 
 
-# === ARTICULOS ===
+# === ARTÍCULOS ===
 
 @app.route("/api/articulos/importar", methods=["POST"])
 def importar_articulos():
+    """
+    Importación rápida para 120k+ filas:
+    - Lee xlsx con openpyxl read_only
+    - Construye un TSV en memoria (tab-separated)
+    - TRUNCATE + COPY FROM STDIN (muy rápido)
+    """
     if not session.get("es_admin"):
         return jsonify({"success": False, "message": "No autorizado"}), 403
 
     if "archivo" not in request.files:
-        return jsonify({"success": False, "message": "No se recibio ningun archivo"}), 400
+        return jsonify({"success": False, "message": "No se recibió archivo"}), 400
 
     archivo = request.files["archivo"]
     if not archivo or archivo.filename == "":
-        return jsonify({"success": False, "message": "Nombre de archivo vacio"}), 400
+        return jsonify({"success": False, "message": "Nombre de archivo vacío"}), 400
 
-    if not archivo.filename.lower().endswith((".xlsx", ".xls")):
-        return jsonify({"success": False, "message": "El archivo debe ser Excel (.xlsx o .xls)"}), 400
+    if not archivo.filename.lower().endswith(".xlsx"):
+        return jsonify({"success": False, "message": "Debe ser un archivo .xlsx"}), 400
 
-    def norm_str(x):
-        return str(x).strip() if x is not None else ""
-
-    def norm_ean(x):
-        """
-        Convierte EAN desde:
-        - números (excel): 8.412345678901e12, 8412345678901.0, etc.
-        - strings con espacios
-        Devuelve string solo-dígitos o "" si no es válido.
-        """
+    def norm(x):
         if x is None:
             return ""
-        # si es número, evita .0 y notación científica
-        if isinstance(x, (int,)):
-            s = str(x)
-        elif isinstance(x, float):
-            # 8412345678901.0 -> 8412345678901
+        if isinstance(x, float):
             if x.is_integer():
-                s = str(int(x))
-            else:
-                s = format(x, "f").rstrip("0").rstrip(".")
-        else:
-            s = str(x).strip()
-
-        # quita espacios y caracteres raros
-        s = s.replace(" ", "").replace("\t", "").replace("\n", "")
-
-        # algunos excels convierten a científico en texto: "8.4123E+12"
-        # intentamos parsear si contiene 'e'/'E'
-        if "e" in s.lower():
-            try:
-                s = str(int(float(s)))
-            except Exception:
-                pass
-
-        # deja solo dígitos
-        s_digits = "".join(ch for ch in s if ch.isdigit())
-        return s_digits
+                return str(int(x))
+            return format(x, "f").rstrip("0").rstrip(".")
+        return str(x).strip()
 
     try:
         from openpyxl import load_workbook
 
-        # data_only=True para que lea valores calculados si hay fórmulas
-        wb = load_workbook(archivo, data_only=True)
+        wb = load_workbook(archivo, data_only=True, read_only=True)
         ws = wb.active
 
-        total_filas = 0
-        filas_validas = 0
+        buf = StringIO()
+        total = 0
         descartadas = 0
-        importados = 0
-        duplicados = 0
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            codigo = norm(row[0] if len(row) > 0 else None)
+            descripcion = norm(row[1] if len(row) > 1 else None)
+            ean = norm(row[2] if len(row) > 2 else None)
+
+            if not codigo or not ean:
+                descartadas += 1
+                continue
+
+            # TSV (tab-separated) — ojo: limpiamos tabs/saltos para no romper COPY
+            codigo = codigo.replace("\t", " ").replace("\n", " ").replace("\r", " ")
+            descripcion = descripcion.replace("\t", " ").replace("\n", " ").replace("\r", " ")
+            ean = ean.replace("\t", "").replace("\n", "").replace("\r", "")
+
+            buf.write(f"{codigo}\t{descripcion}\t{ean}\n")
+            total += 1
+
+        buf.seek(0)
 
         with get_db() as conn:
             with conn.cursor() as cursor:
-                cursor.execute("DELETE FROM articulos")
+                cursor.execute("TRUNCATE articulos")
 
-                for row in ws.iter_rows(min_row=2, values_only=True):
-                    total_filas += 1
-
-                    codigo_articulo = norm_str(row[0] if len(row) > 0 else None)
-                    descripcion = norm_str(row[1] if len(row) > 1 else None)
-                    ean = norm_ean(row[2] if len(row) > 2 else None)
-
-                    if not codigo_articulo or not ean:
-                        descartadas += 1
-                        continue
-
-                    filas_validas += 1
-
-                    cursor.execute(
-                        """
-                        INSERT INTO articulos (codigo_articulo, descripcion, ean)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (ean) DO NOTHING
-                        """,
-                        (codigo_articulo, descripcion, ean),
-                    )
-
-                    if cursor.rowcount:
-                        importados += 1
-                    else:
-                        duplicados += 1
+                cursor.copy(
+                    """
+                    COPY articulos (codigo_articulo, descripcion, ean)
+                    FROM STDIN
+                    WITH (FORMAT text)
+                    """,
+                    buf,
+                )
 
             conn.commit()
 
         return jsonify({
             "success": True,
-            "message": (
-                f"Importación OK. Total filas: {total_filas}. "
-                f"Válidas: {filas_validas}. Importadas: {importados}. "
-                f"Duplicadas: {duplicados}. Descartadas: {descartadas}."
-            )
+            "message": f"Importación completada: {total} artículos cargados. Descartadas: {descartadas}."
         })
 
     except Exception as e:
@@ -420,7 +373,7 @@ def limpiar_articulos():
 
     with get_db() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("DELETE FROM articulos")
+            cursor.execute("TRUNCATE articulos")
         conn.commit()
 
     return jsonify({"success": True, "message": "Tabla maestra limpiada"})
@@ -474,7 +427,7 @@ def crear_usuario():
 
 
 @app.route("/api/admin/usuarios/<int:usuario_id>", methods=["DELETE"])
-def eliminar_usuario(usuario_id: int):
+def eliminar_usuario(usuario_id):
     if not session.get("es_admin"):
         return jsonify({"success": False, "message": "No autorizado"}), 403
 
