@@ -63,24 +63,6 @@
                 <p>El archivo Excel debe tener las columnas: <strong>Codigo Articulo</strong>, <strong>Descripcion</strong>, <strong>EAN</strong></p>
                 <p style="margin-top: 10px; color: var(--color-text-muted-light);">Solo se registraran codigos que existan en este maestro.</p>
             </div>
-
-            <div class="form-card">
-                <h3>Importar desde SharePoint</h3>
-                <p style="margin-bottom: 10px; color: var(--color-text-muted-light);">
-                    El archivo se descarga en el servidor para evitar limites de peso del endpoint.
-                </p>
-                <div class="form-group">
-                    <label for="sharepointUrl">URL de descarga</label>
-                    <input type="url" id="sharepointUrl" placeholder="https://.../maestro.xlsx">
-                </div>
-                <div class="form-group">
-                    <label for="sharepointAuth">Cabecera Authorization (opcional)</label>
-                    <input type="text" id="sharepointAuth" placeholder="Bearer eyJ...">
-                </div>
-                <div class="form-actions">
-                    <button id="btnImportarSharepoint" type="button" class="btn btn-primary">Importar desde SharePoint</button>
-                </div>
-            </div>
         </div>
 
         <!-- Lecturas -->
@@ -223,31 +205,6 @@
             }
 
             e.target.value = '';
-        });
-
-        document.getElementById('btnImportarSharepoint').addEventListener('click', async () => {
-            const url = document.getElementById('sharepointUrl').value.trim();
-            const auth_header = document.getElementById('sharepointAuth').value.trim();
-
-            if (!url) {
-                alert('Ingresa la URL de descarga de SharePoint');
-                return;
-            }
-
-            const payload = { url };
-            if (auth_header) payload.auth_header = auth_header;
-
-            try {
-                const data = await apiFetch('/api/articulos/importar_sharepoint', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                alert(data.message || 'Importacion completada');
-                cargarContadorArticulos();
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
         });
 
         document.getElementById('btnLimpiarMaestro').addEventListener('click', async () => {
