@@ -1,4 +1,7 @@
 import os
+import tempfile
+import urllib.error
+import urllib.request
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -290,6 +293,187 @@ def exportar_excel():
 
 
 # === ARTICULOS ===
+
+def _norm_str(x):
+    return str(x).strip() if x is not None else ""
+
+
+def _norm_ean(x):
+    # Soporta EAN como int/float/cientifico/string
+    if x is None:
+        return ""
+    if isinstance(x, int):
+        s = str(x)
+    elif isinstance(x, float):
+        s = str(int(x)) if x.is_integer() else str(x)
+    else:
+        s = str(x).strip()
+
+    s = s.replace(" ", "").replace("\t", "").replace("\n", "")
+    if "e" in s.lower():
+        try:
+            s = str(int(float(s)))
+        except Exception:
+            pass
+
+    return "".join(ch for ch in s if ch.isdigit())
+
+
+def _importar_articulos_desde_excel_fuente(excel_source):
+    from openpyxl import load_workbook
+
+    batch_size = int(os.environ.get("IMPORT_BATCH_SIZE", "2000"))
+
+    try:
+        if hasattr(excel_source, "seek"):
+            try:
+                excel_source.seek(0)
+            except Exception:
+                pass
+        wb = load_workbook(excel_source, data_only=True, read_only=True)
+    except Exception as exc:
+        raise RuntimeError(f"No se pudo leer el Excel: {exc}") from exc
+
+    try:
+        ws = wb.active
+
+        total_filas = 0
+        descartadas = 0
+        importados = 0
+        batch = []
+
+        insert_sql = """
+            INSERT INTO articulos (codigo_articulo, descripcion, ean)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (ean) DO NOTHING
+        """
+
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM articulos")
+
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    total_filas += 1
+
+                    codigo_articulo = _norm_str(row[0] if len(row) > 0 else None)
+                    descripcion = _norm_str(row[1] if len(row) > 1 else None)
+                    ean = _norm_ean(row[2] if len(row) > 2 else None)
+
+                    if not codigo_articulo or not ean:
+                        descartadas += 1
+                        continue
+
+                    batch.append((codigo_articulo, descripcion, ean))
+
+                    if len(batch) >= batch_size:
+                        cursor.executemany(insert_sql, batch)
+                        importados += len(batch)
+                        batch.clear()
+
+                if batch:
+                    cursor.executemany(insert_sql, batch)
+                    importados += len(batch)
+                    batch.clear()
+
+            conn.commit()
+
+        return {
+            "total_filas": total_filas,
+            "descartadas": descartadas,
+            "importados": importados,
+            "batch_size": batch_size,
+        }
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+
+def _descargar_excel_sharepoint(url: str, auth_header: str | None = None, timeout: int = 30) -> str:
+    """
+    Descarga un Excel desde SharePoint a un archivo temporal para procesarlo por streaming.
+    """
+    if not url:
+        raise ValueError("URL de SharePoint requerida")
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("URL de SharePoint invalida")
+
+    req = urllib.request.Request(url)
+    req.add_header(
+        "Accept",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,*/*;q=0.9",
+    )
+    if auth_header:
+        req.add_header("Authorization", auth_header)
+
+    suffix = ".xlsx" if parsed.path.lower().endswith(".xlsx") else ".xls"
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp, tempfile.NamedTemporaryFile(
+            delete=False, suffix=suffix
+        ) as tmp:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+
+            return tmp.name
+
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"No se pudo descargar el archivo (HTTP {exc.code})") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"No se pudo conectar a SharePoint: {exc.reason}") from exc
+
+
+@app.route("/api/articulos/importar_sharepoint", methods=["POST"])
+def importar_articulos_sharepoint():
+    """
+    Importa el maestro directamente desde una URL de SharePoint para evitar limites de subida.
+    """
+    if not session.get("es_admin"):
+        return jsonify({"success": False, "message": "No autorizado"}), 403
+
+    data = request.json or {}
+    url = (data.get("url") or data.get("sharepoint_url") or "").strip()
+    auth_header = (
+        data.get("auth_header")
+        or data.get("authorization")
+        or os.environ.get("SHAREPOINT_AUTH_HEADER", "")
+    ).strip()
+
+    if not url:
+        return jsonify({"success": False, "message": "URL de SharePoint requerida"}), 400
+
+    timeout = int(os.environ.get("SHAREPOINT_TIMEOUT", "45"))
+    temp_path = None
+
+    try:
+        temp_path = _descargar_excel_sharepoint(url, auth_header=auth_header or None, timeout=timeout)
+        resultado = _importar_articulos_desde_excel_fuente(temp_path)
+        return jsonify({
+            "success": True,
+            "message": (
+                "Importacion SharePoint OK. Filas leidas: {total_filas}. Importadas (intentadas): "
+                "{importados}. Descartadas: {descartadas}. Batch: {batch_size}."
+            ).format(**resultado)
+        })
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"success": False, "message": f"Error: {str(exc)}"}), 500
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
 
 @app.route("/api/articulos/importar", methods=["POST"])
 def importar_articulos():

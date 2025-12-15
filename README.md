@@ -46,6 +46,13 @@ El archivo Excel debe tener 3 columnas (con encabezados en la primera fila):
 | ART001          | Producto ejemplo 1 | 8412345678901 |
 | ART002          | Producto ejemplo 2 | 8412345678902 |
 
+## Importar maestro desde SharePoint
+
+- En el panel de administracion hay un formulario para pegar la URL de descarga directa de SharePoint (idealmente con `?download=1`).
+- El backend descarga el Excel en streaming y lo procesa, evitando los limites de tamano del endpoint de subida.
+- Si tu biblioteca de documentos requiere token, puedes definir la cabecera en el campo "Authorization" o en la variable de entorno `SHAREPOINT_AUTH_HEADER`.
+- El timeout de descarga se puede ajustar con `SHAREPOINT_TIMEOUT` (segundos, por defecto 45).
+
 ## Base de datos
 
 ### Tabla: articulos (Maestro)
