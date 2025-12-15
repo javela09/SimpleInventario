@@ -300,63 +300,55 @@ def importar_articulos():
         return jsonify({"success": False, "message": "No se recibio ningun archivo"}), 400
 
     archivo = request.files["archivo"]
-    if not archivo or archivo.filename == "":
+    if archivo.filename == "":
         return jsonify({"success": False, "message": "Nombre de archivo vacio"}), 400
 
     if not archivo.filename.lower().endswith((".xlsx", ".xls")):
         return jsonify({"success": False, "message": "El archivo debe ser Excel (.xlsx o .xls)"}), 400
 
+    # Ajustable: 1000–5000 suele ir bien
+    BATCH_SIZE = int(os.environ.get("IMPORT_BATCH_SIZE", "2000"))
+
     def norm_str(x):
         return str(x).strip() if x is not None else ""
 
     def norm_ean(x):
-        """
-        Convierte EAN desde:
-        - números (excel): 8.412345678901e12, 8412345678901.0, etc.
-        - strings con espacios
-        Devuelve string solo-dígitos o "" si no es válido.
-        """
+        # Soporta EAN como int/float/científico/string
         if x is None:
             return ""
-        # si es número, evita .0 y notación científica
-        if isinstance(x, (int,)):
+        if isinstance(x, int):
             s = str(x)
         elif isinstance(x, float):
-            # 8412345678901.0 -> 8412345678901
-            if x.is_integer():
-                s = str(int(x))
-            else:
-                s = format(x, "f").rstrip("0").rstrip(".")
+            s = str(int(x)) if x.is_integer() else str(x)
         else:
             s = str(x).strip()
 
-        # quita espacios y caracteres raros
         s = s.replace(" ", "").replace("\t", "").replace("\n", "")
-
-        # algunos excels convierten a científico en texto: "8.4123E+12"
-        # intentamos parsear si contiene 'e'/'E'
         if "e" in s.lower():
             try:
                 s = str(int(float(s)))
             except Exception:
                 pass
 
-        # deja solo dígitos
-        s_digits = "".join(ch for ch in s if ch.isdigit())
-        return s_digits
+        return "".join(ch for ch in s if ch.isdigit())
 
     try:
         from openpyxl import load_workbook
 
-        # data_only=True para que lea valores calculados si hay fórmulas
-        wb = load_workbook(archivo, data_only=True)
+        # read_only=True reduce memoria y suele ir mejor con archivos grandes
+        wb = load_workbook(archivo, data_only=True, read_only=True)
         ws = wb.active
 
         total_filas = 0
-        filas_validas = 0
         descartadas = 0
         importados = 0
-        duplicados = 0
+        batch = []
+
+        insert_sql = """
+            INSERT INTO articulos (codigo_articulo, descripcion, ean)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (ean) DO NOTHING
+        """
 
         with get_db() as conn:
             with conn.cursor() as cursor:
@@ -373,31 +365,24 @@ def importar_articulos():
                         descartadas += 1
                         continue
 
-                    filas_validas += 1
+                    batch.append((codigo_articulo, descripcion, ean))
 
-                    cursor.execute(
-                        """
-                        INSERT INTO articulos (codigo_articulo, descripcion, ean)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (ean) DO NOTHING
-                        """,
-                        (codigo_articulo, descripcion, ean),
-                    )
+                    if len(batch) >= BATCH_SIZE:
+                        cursor.executemany(insert_sql, batch)
+                        importados += len(batch)
+                        batch.clear()
 
-                    if cursor.rowcount:
-                        importados += 1
-                    else:
-                        duplicados += 1
+                # flush final
+                if batch:
+                    cursor.executemany(insert_sql, batch)
+                    importados += len(batch)
+                    batch.clear()
 
             conn.commit()
 
         return jsonify({
             "success": True,
-            "message": (
-                f"Importación OK. Total filas: {total_filas}. "
-                f"Válidas: {filas_validas}. Importadas: {importados}. "
-                f"Duplicadas: {duplicados}. Descartadas: {descartadas}."
-            )
+            "message": f"Importacion OK. Filas leidas: {total_filas}. Importadas (intentadas): {importados}. Descartadas: {descartadas}. Batch: {BATCH_SIZE}."
         })
 
     except Exception as e:
